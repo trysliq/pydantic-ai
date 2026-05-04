@@ -1293,6 +1293,55 @@ async def test_dynamic_toolset_outside_workflow():
     assert result.output == snapshot('{"get_dynamic_weather":"Weather in a for Bob: sunny."}')
 
 
+def return_instructions(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+    return ModelResponse(parts=[TextPart(agent_info.instructions or '')])
+
+
+dynamic_toolset_instructions_agent = Agent(
+    FunctionModel(return_instructions), name='dynamic_toolset_instructions_agent'
+)
+
+
+@dynamic_toolset_instructions_agent.toolset(id='dynamic_instruction_toolset', per_run_step=False)
+async def my_dynamic_instruction_toolset(ctx: RunContext[None]) -> FunctionToolset[None]:
+    toolset = FunctionToolset[None](
+        id='dynamic_instruction_tools',
+        instructions='IMPORTANT_SENTINEL_INSTRUCTION_FROM_DYNAMIC_TOOLSET',
+    )
+    return toolset
+
+
+dynamic_toolset_instructions_temporal_agent = TemporalAgent(
+    dynamic_toolset_instructions_agent,
+    activity_config=BASE_ACTIVITY_CONFIG,
+)
+
+
+@workflow.defn
+class DynamicToolsetInstructionsWorkflow:
+    @workflow.run
+    async def run(self, prompt: str) -> str:
+        result = await dynamic_toolset_instructions_temporal_agent.run(prompt)
+        return result.output
+
+
+async def test_dynamic_toolset_instructions_in_workflow(client: Client):
+    """Instructions from a dynamic toolset should propagate through Temporal activities."""
+    async with Worker(
+        client,
+        task_queue=TASK_QUEUE,
+        workflows=[DynamicToolsetInstructionsWorkflow],
+        plugins=[AgentPlugin(dynamic_toolset_instructions_temporal_agent)],
+    ):
+        output = await client.execute_workflow(
+            DynamicToolsetInstructionsWorkflow.run,
+            args=['Use the dynamic toolset instructions'],
+            id=DynamicToolsetInstructionsWorkflow.__name__,
+            task_queue=TASK_QUEUE,
+        )
+        assert output == snapshot('IMPORTANT_SENTINEL_INSTRUCTION_FROM_DYNAMIC_TOOLSET')
+
+
 # --- MCP-based DynamicToolset test ---
 # Tests that @agent.toolset with an MCP toolset works with Temporal workflows.
 # Uses MCPServerStreamableHTTP (HTTP-based) rather than subprocess-based MCP servers.
@@ -2498,12 +2547,8 @@ async def test_custom_model_settings(allow_model_requests: None, client: Client)
         assert output == snapshot("{'max_tokens': 123, 'custom_setting': 'custom_value'}")
 
 
-def return_mcp_instructions(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
-    return ModelResponse(parts=[TextPart(agent_info.instructions or '')])
-
-
 mcp_instructions_agent = Agent(
-    FunctionModel(return_mcp_instructions),
+    FunctionModel(return_instructions),
     name='mcp_instructions_agent',
     toolsets=[MCPServerStdio('python', ['-m', 'tests.mcp_server'], include_instructions=True, id='mcp')],
 )
